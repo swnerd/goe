@@ -127,7 +127,50 @@ class OffloadTransportOracleApi(OffloadTransportRdbmsApiInterface):
     # PRIVATE METHODS
     ###########################################################################
 
+    def _verify_connection(self, rdbms_conn):
+        if rdbms_conn:
+            try:
+                ora_curs = rdbms_conn.cursor()
+                # This execute() is important for triggering reconnection requirements. Taking a new cursor is not enough.
+                ora_curs.execute(
+                    'ALTER SESSION SET TRACEFILE_IDENTIFIER="%s"' % FRONTEND_TRACE_ID
+                )
+            except cxo.DatabaseError as exc:
+                # Add more error codes to the list below as required.
+                if any(
+                    _ in str(exc)
+                    for _ in (
+                        "ORA-02396",
+                        "ORA-2396",
+                        "ORA-03113",
+                        "ORA-3113",
+                        "ORA-03114",
+                        "ORA-3114",
+                    )
+                ):
+                    # Reconnect and try again (not in a loop, just try once and if we can't get going again then fail)
+                    # "ORA-02396: exceeded maximum idle time, please connect again": Session sniped due to profile.
+                    # "ORA-03113: end-of-file on communication channel: comes hand in hand with ORA-03114.
+                    # "ORA-03114: not connected to Oracle": e.g. when a firewall rule severs an idle session.
+                    # Sometimes error codes are not padded with a zero, for example:
+                    #    DPI-1080: connection was closed by ORA-2396
+                    self._log(
+                        f"Resetting ADM/APP connection to Oracle due to: {str(exc)}", detail=VVERBOSE
+                    )
+                    logger.info(f"Resetting ADM/APP connection to Oracle due to: {str(exc)}")
+                    try:
+                        rdbms_conn.close()
+                        rdbms_conn = None
+                    except Exception as exc:
+                        self._log(
+                            "Exception closing ADM/APP connection:\n%s" % str(exc), detail=VVERBOSE
+                        )
+                else:
+                    raise
+
     def _get_adm_connection(self):
+        if self._rdbms_adm_conn:
+            _verify_connection(self._rdbms_adm_conn)
         if not self._rdbms_adm_conn:
             self._rdbms_adm_conn = get_rdbms_connection_for_oracle(
                 self._offload_options.ora_adm_user,
@@ -143,6 +186,8 @@ class OffloadTransportOracleApi(OffloadTransportRdbmsApiInterface):
         self._rdbms_adm_conn = None
 
     def _get_app_connection(self):
+        if self._rdbms_app_conn:
+            _verify_connection(self._rdbms_app_conn)
         if not self._rdbms_app_conn:
             self._rdbms_app_conn = get_rdbms_connection_for_oracle(
                 self._offload_options.rdbms_app_user,
